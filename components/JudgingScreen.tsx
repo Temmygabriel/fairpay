@@ -17,8 +17,34 @@ interface JudgingProps {
   onHome: () => void;
 }
 
-function copyToClipboard(text: string) {
-  navigator.clipboard.writeText(text).catch(() => {});
+function copyToClipboard(text: string, btnSelector: string) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text);
+    } else {
+      // Fallback for HTTP / older browsers
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    // Visual feedback — change button text briefly
+    const btn = document.querySelector(btnSelector) as HTMLButtonElement;
+    if (btn) {
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      btn.style.color = "var(--conf-high)";
+      setTimeout(() => {
+        btn.textContent = original;
+        btn.style.color = "";
+      }, 2000);
+    }
+  } catch { /* silent */ }
 }
 
 export default function JudgingScreen({
@@ -60,7 +86,7 @@ export default function JudgingScreen({
           </div>
           <p style={{ fontSize: "13px", color: "var(--text-muted)", lineHeight: 1.6 }}>
             This usually takes{" "}
-            <strong style={{ color: "var(--indigo-light)" }}>3–5 minutes</strong>.
+            <strong style={{ color: "var(--indigo-light)" }}>1–3 minutes</strong>.
             Keep this tab open or save your submission ID below.
           </p>
         </div>
@@ -99,7 +125,8 @@ export default function JudgingScreen({
               </div>
               <button
                 className="sub-id-copy"
-                onClick={() => copyToClipboard(submissionId)}
+                id="judging-copy-btn"
+                onClick={() => copyToClipboard(submissionId, "#judging-copy-btn")}
               >
                 Copy
               </button>

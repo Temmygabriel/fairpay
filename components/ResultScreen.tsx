@@ -95,8 +95,31 @@ function fmtSalary(n: number, currency: string): string {
   return `${sym}${n.toLocaleString()}`;
 }
 
-function copyToClipboard(text: string) {
-  navigator.clipboard.writeText(text).catch(() => {});
+function copyToClipboard(text: string, btnSelector?: string) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text);
+    } else {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    if (btnSelector) {
+      const btn = document.querySelector(btnSelector) as HTMLButtonElement;
+      if (btn) {
+        const original = btn.textContent;
+        btn.textContent = "Copied!";
+        btn.style.color = "var(--conf-high)";
+        setTimeout(() => { btn.textContent = original; btn.style.color = ""; }, 2000);
+      }
+    }
+  } catch { /* silent */ }
 }
 
 function shareText(sub: Submission): string {
@@ -169,7 +192,8 @@ export default function ResultScreen({
         {/* Submission ID — copy */}
         <button
           className="sub-id-copy"
-          onClick={() => copyToClipboard(submission.id)}
+          id="result-id-copy-btn"
+          onClick={() => copyToClipboard(submission.id, "#result-id-copy-btn")}
           title="Copy submission ID"
           style={{ flexShrink: 0 }}
         >
@@ -371,6 +395,7 @@ export default function ResultScreen({
       {/* ── Share button ── */}
       <button
         className="btn-outline"
+        id="result-share-btn"
         onClick={() => {
           if (navigator.share) {
             navigator.share({
@@ -378,8 +403,7 @@ export default function ResultScreen({
               text:  shareText(submission),
             }).catch(() => {});
           } else {
-            copyToClipboard(shareText(submission));
-            alert("Share text copied to clipboard!");
+            copyToClipboard(shareText(submission), "#result-share-btn");
           }
         }}
       >
