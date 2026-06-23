@@ -2,9 +2,10 @@
 // FairPay — Main Orchestrator
 // FOLDER: app/App.tsx
 //
-// All screen state, polling, and contract calls live here.
-// Polling pattern copied exactly from NYP — do not deviate.
-// localStorage keys use "fp_" prefix (fairpay) to avoid collisions with NYP.
+// v2.0 — handleSubmit now passes form.role_id to submitSalary instead of
+// form.job_title (which no longer exists on SubmitFormData). Everything
+// else is unchanged from v1 — polling pattern, account handling, screen
+// routing are all identical.
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Screen, Submission, SubmitFormData } from "../types";
@@ -15,7 +16,6 @@ import {
   getSubmission,
 } from "../lib/contract";
 
-// Screens — imported in Sessions 4-6, stubbed here so App compiles now
 import LandingScreen    from "../components/LandingScreen";
 import SubmitScreen     from "../components/SubmitScreen";
 import JudgingScreen    from "../components/JudgingScreen";
@@ -41,18 +41,16 @@ export default function App() {
 
   // ----------------------------------------------------------------
   // Refs — used inside polling closure to always read current values
-  // If these were state, the poll closure would capture stale values.
   // ----------------------------------------------------------------
   const accountRef         = useRef<ReturnType<typeof makeAccount> | null>(null);
   const playerAddressRef   = useRef<string>("");
   const screenRef          = useRef<Screen>("landing");
-  const submissionIdRef    = useRef<string>("");   // current submission being polled
-  const calculatingRef     = useRef(false);        // mutex — prevents calculate_result double-fire
+  const submissionIdRef    = useRef<string>("");
+  const calculatingRef     = useRef(false);
   const pollTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ----------------------------------------------------------------
   // localStorage guard — exact pattern from NYP build guide
-  // Handles: "undefined" string, null, bad key, makeAccount throwing
   // ----------------------------------------------------------------
   useEffect(() => {
     let acc: ReturnType<typeof makeAccount>;
@@ -67,7 +65,6 @@ export default function App() {
       ) {
         acc = makeAccount(savedKey as `0x${string}`);
       } else {
-        // Bad or missing key — clear stale data and generate fresh
         if (savedKey !== null) {
           localStorage.removeItem("fp_private_key");
           localStorage.removeItem("fp_address");
@@ -76,7 +73,6 @@ export default function App() {
         localStorage.setItem("fp_private_key", acc.privateKey);
       }
     } catch {
-      // makeAccount threw on saved key — nuclear clear and start fresh
       localStorage.removeItem("fp_private_key");
       localStorage.removeItem("fp_address");
       acc = makeAccount();
@@ -88,7 +84,6 @@ export default function App() {
     localStorage.setItem("fp_address", acc.address);
   }, []);
 
-  // Keep screenRef in sync with screen state
   useEffect(() => { screenRef.current = screen; }, [screen]);
 
   // ----------------------------------------------------------------
@@ -106,21 +101,17 @@ export default function App() {
     submissionIdRef.current = sid;
 
     const poll = async () => {
-      // Bail if user navigated away from an active submission screen
       if (!submissionIdRef.current) return;
       if (!["judging"].includes(screenRef.current)) return;
 
       try {
         const data: Submission = await getSubmission(submissionIdRef.current);
 
-        // Error response from contract
         if ((data as any).error) return;
 
         setSubmission(data);
 
         if (data.status === "pending") {
-          // submit_salary confirmed but calculate_result not yet fired —
-          // fire it now. calculatingRef mutex prevents double-fire.
           if (!calculatingRef.current) {
             calculatingRef.current = true;
             try {
@@ -133,12 +124,10 @@ export default function App() {
         }
 
         if (data.status === "judging") {
-          // AI is running — keep polling, nothing to do on frontend
           return;
         }
 
         if (data.status === "completed") {
-          // Done — stop polling, show result
           stopPolling();
           setScreen("result");
         }
@@ -151,11 +140,10 @@ export default function App() {
     pollTimerRef.current = setInterval(poll, POLL_INTERVAL);
   }, [stopPolling]);
 
-  // Clean up polling on unmount
   useEffect(() => { return () => stopPolling(); }, [stopPolling]);
 
   // ----------------------------------------------------------------
-  // Account helper — ensures account is always available
+  // Account helper
   // ----------------------------------------------------------------
   function getAccount() {
     if (!accountRef.current) {
@@ -189,9 +177,10 @@ export default function App() {
 
   /**
    * Called by SubmitScreen when the form is submitted.
-   * Step 1: submit_salary (writeContractWithReturn — gets submission_id back)
-   * Step 2: Navigate to JudgingScreen immediately
-   * Step 3: Start polling — poll will fire calculate_result once it sees "pending"
+   * form.role_id is now sent instead of a free-text job title — see
+   * SubmitScreen.tsx and fairpay.py for why.
+   * Checks for the contract's "ERROR_INVALID_ROLE" / "ERROR_INVALID_CURRENCY"
+   * sentinel return values before treating the result as a real submission id.
    */
   async function handleSubmit(form: SubmitFormData) {
     setLoading("Submitting...");
@@ -202,7 +191,7 @@ export default function App() {
       const sid = await submitSalary(
         acc,
         playerAddressRef.current,
-        form.job_title,
+        form.role_id,
         form.industry,
         form.location,
         form.years_experience,
@@ -211,15 +200,21 @@ export default function App() {
         form.employment_type
       );
 
-      // Got submission_id back — store it everywhere
+      if (sid === "ERROR_INVALID_ROLE" || sid === "ERROR_INVALID_CURRENCY") {
+        setError(
+          sid === "ERROR_INVALID_ROLE"
+            ? "That role isn't recognised. Please pick one from the list."
+            : "That currency isn't supported. Please choose USD or GBP."
+        );
+        setLoading("");
+        return;
+      }
+
       setSubmissionId(sid);
       submissionIdRef.current = sid;
-      calculatingRef.current  = false; // reset mutex for this new submission
+      calculatingRef.current  = false;
 
-      // Navigate to judging screen immediately
       setScreen("judging");
-
-      // Start polling — poll will fire calculate_result on first "pending" hit
       startPolling(sid);
 
     } catch (e: any) {
@@ -232,8 +227,6 @@ export default function App() {
 
   /**
    * Called by LookupScreen when user enters a submission ID manually.
-   * Fetches once — if completed, goes to ResultScreen.
-   * If still judging, starts polling.
    */
   async function handleLookup(sid: string) {
     setLoading("Looking up...");
@@ -256,7 +249,6 @@ export default function App() {
         stopPolling();
         setScreen("result");
       } else {
-        // Still pending or judging — go to judging screen and poll
         calculatingRef.current = false;
         setScreen("judging");
         startPolling(data.id);
