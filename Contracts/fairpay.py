@@ -1,4 +1,5 @@
 # FairPay — Intelligent Salary Evaluation Contract
+# v2.0 — Live web data fetching inside generate() for true GenLayer consensus
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 import genlayer.gl as gl
@@ -23,7 +24,7 @@ class FairPay(gl.Contract):
         self.submission_count = u256(0)
 
     # ----------------------------------------------------------------
-    # Internal helpers — mirror NYP _read_room/_write_room pattern exactly
+    # Internal helpers
     # ----------------------------------------------------------------
 
     def _read_submission(self, submission_id: str) -> dict:
@@ -33,8 +34,6 @@ class FairPay(gl.Contract):
         self.submissions[submission_id] = json.dumps(data)
 
     def _make_submission_id(self) -> str:
-        # submission_count is already incremented before this is called
-        # Produces "SUB000001", "SUB000002", etc.
         n = int(self.submission_count)
         return "SUB" + str(n).zfill(6)
 
@@ -80,7 +79,6 @@ class FairPay(gl.Contract):
         currency: str,
         employment_type: str,
     ) -> str:
-        # Increment counter — u256(int(x) + 1) pattern from build guide, never +=
         self.submission_count = u256(int(self.submission_count) + 1)
         submission_id = self._make_submission_id()
 
@@ -90,8 +88,8 @@ class FairPay(gl.Contract):
             "job_title": job_title,
             "industry": industry,
             "location": location,
-            "years_experience": years_experience,  # always str: "0-1","1-3","3-5","5-10","10+"
-            "current_salary": current_salary,       # always str: the number as string
+            "years_experience": years_experience,
+            "current_salary": current_salary,
             "currency": currency,
             "employment_type": employment_type,
             "status": "pending",
@@ -106,7 +104,6 @@ class FairPay(gl.Contract):
 
         self._write_submission(submission_id, submission)
 
-        # Register this submission under the submitter address
         ids = self._get_address_submissions(submitter_address)
         ids.append(submission_id)
         self._set_address_submissions(submitter_address, ids)
@@ -115,13 +112,12 @@ class FairPay(gl.Contract):
 
     @gl.public.write
     def calculate_result(self, submission_id: str) -> None:
-        # THE ONE AND ONLY AI CALL
         # Gate: only run if still pending — prevents double-fire
         submission = self._read_submission(submission_id)
         if submission["status"] != "pending":
             return
 
-        # Immediately flip to "judging" so a second call hits the gate above and returns
+        # Flip to "judging" immediately so a second call hits the gate and returns
         submission["status"] = "judging"
         self._write_submission(submission_id, submission)
 
@@ -133,38 +129,96 @@ class FairPay(gl.Contract):
         currency         = submission["currency"]
         employment_type  = submission["employment_type"]
 
-        prompt = (
-            "You are evaluating whether a salary is fair based on real-world market data.\n\n"
-            "Submission details:\n"
-            "Job Title: " + job_title + "\n"
-            "Industry: " + industry + "\n"
-            "Location: " + location + "\n"
-            "Years of Experience: " + years_experience + "\n"
-            "Current Salary: " + current_salary + " " + currency + "\n"
-            "Employment Type: " + employment_type + "\n\n"
-            "Based on publicly available salary data, job postings, and industry reports for this role and location:\n"
-            "1. Determine the market salary range (low, median, high) in the same currency (" + currency + ")\n"
-            "2. Verdict: UNDERPAID if salary is below 85% of market median, "
-            "OVERPAID if above 120% of market median, MARKET RATE otherwise\n"
-            "3. Write one clear sentence explaining your verdict\n"
-            "4. Rate your confidence: HIGH if you have strong market data, "
-            "MEDIUM if data is limited, LOW if location/role is highly specialised\n\n"
-            "Return ONLY a JSON object starting with { and ending with }. No markdown, no preamble.\n"
-            'Format: {"verdict": "UNDERPAID", "market_range_low": 95000, '
-            '"market_range_high": 130000, "market_median": 112000, '
-            '"currency": "' + currency + '", "reasoning": "one sentence", "confidence": "HIGH"}'
-        )
+        # ── THE KEY GenLayer PATTERN ──────────────────────────────────────────
+        # gl.nondet.web.render must be called INSIDE generate() so that every
+        # validator independently fetches live data and consensus runs over
+        # both the fetched content and the AI verdict together.
+        # Fetching outside generate() means validators inherit pre-fetched data
+        # — that is NOT consensus-safe and defeats the purpose.
 
         def generate():
+            def safe_fetch(url):
+                try:
+                    content = gl.nondet.web.render(url)
+                    return content[:2000] if content else "no data returned"
+                except Exception as e:
+                    return "fetch failed: " + str(e)
+
+            # Build URL-friendly slugs for the role and location
+            role_slug     = job_title.lower().replace(" ", "-").replace("/", "-")
+            location_slug = location.lower().replace(" ", "-").replace(",", "")
+            role_query    = job_title.replace(" ", "+")
+            location_query = location.replace(" ", "+")
+
+            # Three independent sources — different angle on the same market
+            web1 = safe_fetch(
+                "https://www.levels.fyi/t/" + role_slug + "/"
+            )
+            web2 = safe_fetch(
+                "https://www.payscale.com/research/US/Job="
+                + job_title.replace(" ", "_")
+                + "/Salary"
+            )
+            web3 = safe_fetch(
+                "https://en.wikipedia.org/wiki/"
+                + job_title.replace(" ", "_")
+            )
+
+            prompt = (
+                "You are evaluating whether a salary is fair. "
+                "You have been given LIVE market data fetched right now from the web. "
+                "Use this as your primary source of truth — not your training data.\n\n"
+                "SUBMISSION DETAILS:\n"
+                "Job Title: " + job_title + "\n"
+                "Industry: " + industry + "\n"
+                "Location: " + location + "\n"
+                "Years of Experience: " + years_experience + "\n"
+                "Current Salary: " + current_salary + " " + currency + "\n"
+                "Employment Type: " + employment_type + "\n\n"
+                "LIVE WEB DATA (fetched right now):\n"
+                "--- Source 1 (Levels.fyi): ---\n" + web1 + "\n\n"
+                "--- Source 2 (PayScale): ---\n" + web2 + "\n\n"
+                "--- Source 3 (Wikipedia / role context): ---\n" + web3 + "\n\n"
+                "Using the live data above as ground truth:\n"
+                "1. Determine the current market salary range (low, median, high) "
+                "in " + currency + " for this exact role and location.\n"
+                "2. Verdict rules:\n"
+                "   UNDERPAID   = current salary is below 85% of market median\n"
+                "   MARKET RATE = current salary is between 85% and 120% of market median\n"
+                "   OVERPAID    = current salary is above 120% of market median\n"
+                "3. Write ONE clear sentence explaining the verdict, citing what "
+                "the live data showed (e.g. 'Levels.fyi shows the median for this "
+                "role in Lagos is X').\n"
+                "4. Confidence:\n"
+                "   HIGH   = live data was rich and directly relevant\n"
+                "   MEDIUM = live data was partial or for a nearby region\n"
+                "   LOW    = fetches failed or data was too generic to be precise\n\n"
+                "Return ONLY a JSON object starting with { and ending with }. "
+                "No markdown, no preamble, no explanation outside the JSON.\n"
+                'Format: {"verdict": "UNDERPAID", "market_range_low": 95000, '
+                '"market_range_high": 130000, "market_median": 112000, '
+                '"currency": "' + currency + '", '
+                '"reasoning": "one sentence citing live data", "confidence": "HIGH"}'
+            )
+
             return gl.nondet.exec_prompt(prompt)
 
         result_raw = gl.eq_principle.prompt_non_comparative(
             generate,
-            task="evaluate whether a submitted salary is fair compared to real-world market data for the given role, industry, and location",
-            criteria="valid JSON with verdict as one of UNDERPAID/MARKET RATE/OVERPAID, market_range_low/market_range_high/market_median as integers in the submitted currency, reasoning as one clear sentence string, and confidence as HIGH/MEDIUM/LOW"
+            task=(
+                "fetch live salary market data from the web and evaluate whether "
+                "the submitted salary is UNDERPAID, MARKET RATE, or OVERPAID for "
+                "the given role, location, and experience level"
+            ),
+            criteria=(
+                "valid JSON with verdict as one of UNDERPAID/MARKET RATE/OVERPAID, "
+                "market_range_low/market_range_high/market_median as integers in the "
+                "submitted currency derived from live web data, reasoning as one clear "
+                "sentence citing the live sources, and confidence as HIGH/MEDIUM/LOW"
+            )
         )
 
-        # Defensive JSON parsing — mirror NYP calculate_results pattern exactly
+        # ── Defensive JSON parsing ────────────────────────────────────────────
         verdict           = "MARKET RATE"
         market_range_low  = None
         market_range_high = None
@@ -202,7 +256,7 @@ class FairPay(gl.Contract):
                     confidence = raw_conf
 
         except Exception:
-            # Fallback: defaults stay in place — submission always completes, never hangs
+            # Fallback: defaults stay — submission always completes, never hangs
             pass
 
         # Write completed result back
@@ -215,8 +269,7 @@ class FairPay(gl.Contract):
         submission["confidence"]        = confidence
         self._write_submission(submission_id, submission)
 
-        # Update global_stats for this role+location
-        # Key: job_title.lower() + ":" + location.lower()
+        # Update global_stats for this role + location
         stats_key = job_title.lower() + ":" + location.lower()
         stats = self._read_global_stats(stats_key)
         stats["count"] = stats["count"] + 1
@@ -224,7 +277,7 @@ class FairPay(gl.Contract):
         try:
             stats["salary_sum"] = stats["salary_sum"] + int(current_salary)
         except Exception:
-            pass  # non-numeric current_salary — skip sum, don't break
+            pass
 
         if verdict in stats["verdict_counts"]:
             stats["verdict_counts"][verdict] = stats["verdict_counts"][verdict] + 1
@@ -254,7 +307,6 @@ class FairPay(gl.Contract):
             if raw is not None:
                 results.append(json.loads(raw))
 
-        # Most recent first
         results.reverse()
         return json.dumps(results)
 
@@ -276,18 +328,16 @@ class FairPay(gl.Contract):
 
     @gl.public.view
     def get_recent_submissions(self, limit: str) -> str:
-        # limit is str — GenLayer ABI convention, convert internally
         try:
             n = int(limit)
         except Exception:
             n = 10
 
-        n = max(1, min(n, 50))  # clamp 1-50
+        n = max(1, min(n, 50))
 
         total = int(self.submission_count)
         results = []
 
-        # Walk backwards from most recent — oversample to find n completed
         for i in range(total, max(0, total - n * 3), -1):
             if len(results) >= n:
                 break
@@ -297,7 +347,6 @@ class FairPay(gl.Contract):
             if raw is None:
                 continue
             sub = json.loads(raw)
-            # Only completed submissions in the feed; strip submitter for anonymity
             if sub.get("status") == "completed":
                 results.append({
                     "id":               sub["id"],
