@@ -4,11 +4,14 @@
 // Core functions (writeContract, writeContractWithReturn, readContract)
 // are copied exactly from NYP — never change these.
 // FairPay-specific wrappers are added at the bottom.
+//
+// v2.0 — submitSalary takes role_id instead of free-text job_title.
+// New getRoles() wrapper for the curated dropdown.
 
 import { createClient, createAccount } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
-import { Submission, GlobalStats, RecentSubmission } from "../types";
+import { Submission, GlobalStats, RecentSubmission, Role } from "../types";
 
 const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as `0x${string}`;
 const MAX_ATTEMPTS = 3;
@@ -130,23 +133,27 @@ export async function readContract(method: string, args: unknown[]): Promise<str
 
 /**
  * Submit a salary for evaluation.
- * Uses writeContractWithReturn because submit_salary returns the submission_id.
- * All args are strings — matches contract parameter types exactly.
+ * Uses writeContractWithReturn because submit_salary returns the submission_id
+ * (or an "ERROR_INVALID_ROLE" / "ERROR_INVALID_CURRENCY" string — callers
+ * should check for these before treating the return value as a real ID).
+ *
+ * roleId must be one of the ids returned by getRoles() — free-text job
+ * titles are no longer accepted by the contract.
  */
 export async function submitSalary(
   account: ReturnType<typeof createAccount>,
   submitterAddress: string,
-  jobTitle: string,
+  roleId: string,
   industry: string,
   location: string,
   yearsExperience: string,  // "0-1" | "1-3" | "3-5" | "5-10" | "10+"
   currentSalary: string,    // number as string e.g. "85000"
-  currency: string,         // "USD" | "GBP" | "NGN"
+  currency: string,         // "USD" | "GBP"
   employmentType: string    // "Full-time" | "Contract" | "Part-time" | "Remote"
 ): Promise<string> {
   return writeContractWithReturn(account, "submit_salary", [
     submitterAddress,
-    jobTitle,
+    roleId,
     industry,
     location,
     yearsExperience,
@@ -169,6 +176,16 @@ export async function calculateResult(
 }
 
 /**
+ * Read the curated, verified role list for the submit-form dropdown.
+ * Each role has a hand-verified live data source per currency — see
+ * fairpay.py for what's actually backing each one.
+ */
+export async function getRoles(): Promise<Role[]> {
+  const raw = await readContract("get_roles", []);
+  return JSON.parse(raw);
+}
+
+/**
  * Read a single submission by ID.
  */
 export async function getSubmission(submissionId: string): Promise<Submission> {
@@ -186,9 +203,11 @@ export async function getMySubmissions(address: string): Promise<Submission[]> {
 
 /**
  * Read aggregate stats for a role + location pair.
+ * roleId must match a get_roles() id — stats are keyed by role_id now,
+ * not a free-text job title string.
  */
-export async function getGlobalStats(role: string, location: string): Promise<GlobalStats> {
-  const raw = await readContract("get_global_stats", [role, location]);
+export async function getGlobalStats(roleId: string, location: string): Promise<GlobalStats> {
+  const raw = await readContract("get_global_stats", [roleId, location]);
   return JSON.parse(raw);
 }
 
