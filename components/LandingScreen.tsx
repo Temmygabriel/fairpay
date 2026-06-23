@@ -2,6 +2,10 @@
 // FairPay — Landing Screen
 // FOLDER: components/LandingScreen.tsx
 //
+// v2.0 — "Supports USD, GBP, NGN" -> "Supports USD, GBP". NGN dropped
+// entirely rather than shipped with a quietly-faked or quietly-worse
+// experience. See fairpay.py module docstring for why.
+//
 // Hero + anonymous value prop + primary CTA + submission ID lookup
 // + nav links to History and Explore.
 // No wallet connect, no login — address is identity.
@@ -48,8 +52,8 @@ export default function LandingScreen({ onNavigate, onStartSubmit }: LandingProp
           </h1>
 
           <p className="hero-subtitle">
-            Submit your salary anonymously. Our AI evaluates it against
-            real market data and tells you exactly where you stand —
+            Submit your salary anonymously. Our AI fetches live wage data for
+            your exact role and tells you exactly where you stand —
             permanently recorded on-chain.
           </p>
 
@@ -135,17 +139,17 @@ export default function LandingScreen({ onNavigate, onStartSubmit }: LandingProp
                   {
                     n: "01",
                     title: "Submit anonymously",
-                    desc: "Enter your job details and salary. No name, no email, no account — your wallet address is your identity.",
+                    desc: "Pick your role and enter your details. No name, no email, no account — your wallet address is your identity.",
                   },
                   {
                     n: "02",
-                    title: "AI evaluates in real-time",
-                    desc: "Our AI searches live market data — job boards, industry reports, regional benchmarks — for your exact role and location.",
+                    title: "AI fetches live data",
+                    desc: "Our AI fetches a verified, current wage-data source for your exact role and cites the figure it finds — not a guess from training data.",
                   },
                   {
                     n: "03",
                     title: "Get your verdict",
-                    desc: "UNDERPAID, MARKET RATE, or OVERPAID. With a market range, a confidence score, and one plain-English reason.",
+                    desc: "UNDERPAID, MARKET RATE, or OVERPAID. With a market range, a confidence score, and the live figure it was based on.",
                   },
                   {
                     n: "04",
@@ -178,7 +182,7 @@ export default function LandingScreen({ onNavigate, onStartSubmit }: LandingProp
               marginTop: "4px",
             }}
           >
-            {["🇺🇸 USD", "🇬🇧 GBP", "🇳🇬 NGN"].map((c) => (
+            {["🇺🇸 USD", "🇬🇧 GBP"].map((c) => (
               <span key={c} style={{ fontSize: "13px", color: "var(--text-muted)", fontWeight: 600 }}>
                 {c}
               </span>
