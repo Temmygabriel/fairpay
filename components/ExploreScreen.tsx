@@ -2,16 +2,19 @@
 // FairPay — Explore Screen
 // FOLDER: components/ExploreScreen.tsx
 //
+// v2.0 — Search tab now uses a role dropdown (from get_roles()) instead of
+// free-text job title input, since get_global_stats is keyed by role_id.
+//
 // Two tabs:
-//   1. Search — enter role + location → get_global_stats → show aggregate data
+//   1. Search — pick role + enter location → get_global_stats → show aggregate data
 //   2. Recent  — get_recent_submissions(20) → anonymous feed of completed verdicts
 //
-// global_stats key format: role.lower() + ":" + location.lower()
+// global_stats key format: role_id + ":" + location.lower()
 // Returns: { count, salary_sum, verdict_counts: { UNDERPAID, MARKET RATE, OVERPAID } }
 
 import { useState, useEffect } from "react";
-import { GlobalStats, RecentSubmission, Verdict } from "../types";
-import { getGlobalStats, getRecentSubmissions } from "../lib/contract";
+import { GlobalStats, RecentSubmission, Verdict, Role } from "../types";
+import { getGlobalStats, getRecentSubmissions, getRoles } from "../lib/contract";
 
 interface ExploreProps {
   onBack: () => void;
@@ -49,7 +52,7 @@ function verdictEmoji(v: Verdict): string {
 function fmtAvg(salary_sum: number, count: number, currency: string): string {
   if (count === 0) return "—";
   const avg = Math.round(salary_sum / count);
-  const sym = currency === "USD" ? "$" : currency === "GBP" ? "£" : "₦";
+  const sym = currency === "USD" ? "$" : currency === "GBP" ? "£" : "";
   if (avg >= 1_000_000) return `${sym}${(avg / 1_000_000).toFixed(1)}m`;
   if (avg >= 1_000)     return `${sym}${Math.round(avg / 1_000)}k`;
   return `${sym}${avg.toLocaleString()}`;
@@ -65,11 +68,11 @@ function pct(n: number, total: number): number {
 // ----------------------------------------------------------------
 function StatsPanel({
   stats,
-  role,
+  roleLabel,
   location,
 }: {
   stats: GlobalStats;
-  role: string;
+  roleLabel: string;
   location: string;
 }) {
   const total      = stats.count;
@@ -81,7 +84,7 @@ function StatsPanel({
     return (
       <div className="empty-state" style={{ padding: "20px 0" }}>
         <div style={{ fontSize: "2rem", marginBottom: "8px" }}>🔍</div>
-        <div>No data yet for <strong style={{ color: "var(--text-primary)" }}>{role}</strong> in <strong style={{ color: "var(--text-primary)" }}>{location}</strong>.</div>
+        <div>No data yet for <strong style={{ color: "var(--text-primary)" }}>{roleLabel}</strong> in <strong style={{ color: "var(--text-primary)" }}>{location}</strong>.</div>
         <div style={{ fontSize: "13px", marginTop: "4px", color: "var(--text-muted)" }}>
           Be the first to submit for this role and location.
         </div>
@@ -115,7 +118,7 @@ function StatsPanel({
           Community data for
         </div>
         <div style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-primary)" }}>
-          {role}
+          {roleLabel}
         </div>
         <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>{location}</div>
       </div>
@@ -262,8 +265,13 @@ function RecentRow({ sub }: { sub: RecentSubmission }) {
 export default function ExploreScreen({ onBack }: ExploreProps) {
   const [tab, setTab]               = useState<Tab>("search");
 
+  // Role list for the search dropdown
+  const [roles, setRoles]               = useState<Role[]>([]);
+  const [rolesLoading, setRolesLoading] = useState(true);
+  const [rolesError, setRolesError]     = useState("");
+
   // Search tab state
-  const [role, setRole]             = useState("");
+  const [roleId, setRoleId]         = useState("");
   const [location, setLocation]     = useState("");
   const [stats, setStats]           = useState<GlobalStats | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -274,6 +282,24 @@ export default function ExploreScreen({ onBack }: ExploreProps) {
   const [recent, setRecent]         = useState<RecentSubmission[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
   const [recentError, setRecentError]     = useState("");
+
+  // Load curated role list on mount
+  useEffect(() => {
+    async function loadRoles() {
+      setRolesLoading(true);
+      setRolesError("");
+      try {
+        const data = await getRoles();
+        setRoles(data);
+        if (data.length > 0) setRoleId(data[0].id);
+      } catch {
+        setRolesError("Could not load role list.");
+      } finally {
+        setRolesLoading(false);
+      }
+    }
+    loadRoles();
+  }, []);
 
   // Load recent when tab switches to "recent"
   useEffect(() => {
@@ -295,13 +321,15 @@ export default function ExploreScreen({ onBack }: ExploreProps) {
     loadRecent();
   }, [tab, recent.length]);
 
+  const selectedRoleLabel = roles.find((r) => r.id === roleId)?.label ?? roleId;
+
   async function handleSearch() {
-    if (!role.trim() || !location.trim()) return;
+    if (!roleId || !location.trim()) return;
     setSearchLoading(true);
     setSearchError("");
     setSearched(true);
     try {
-      const data = await getGlobalStats(role.trim(), location.trim());
+      const data = await getGlobalStats(roleId, location.trim());
       setStats(data);
     } catch {
       setSearchError("Could not fetch data. Try again.");
@@ -342,20 +370,30 @@ export default function ExploreScreen({ onBack }: ExploreProps) {
 
           <div className="form-grid-2">
             <div className="field-group">
-              <label className="field-label">Job Title</label>
-              <input
-                type="text"
-                placeholder="e.g. Software Engineer"
-                value={role}
-                onChange={(e) => { setRole(e.target.value); setSearched(false); }}
-                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              />
+              <label className="field-label">Role</label>
+              {rolesLoading ? (
+                <div className="loading-state">
+                  <span className="spinner" />
+                  <span>Loading…</span>
+                </div>
+              ) : rolesError ? (
+                <p className="error-text">{rolesError}</p>
+              ) : (
+                <select
+                  value={roleId}
+                  onChange={(e) => { setRoleId(e.target.value); setSearched(false); }}
+                >
+                  {roles.map((r) => (
+                    <option key={r.id} value={r.id}>{r.label}</option>
+                  ))}
+                </select>
+              )}
             </div>
             <div className="field-group">
               <label className="field-label">Location</label>
               <input
                 type="text"
-                placeholder="e.g. Lagos"
+                placeholder="e.g. London"
                 value={location}
                 onChange={(e) => { setLocation(e.target.value); setSearched(false); }}
                 onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -366,7 +404,7 @@ export default function ExploreScreen({ onBack }: ExploreProps) {
           <button
             className="btn-primary"
             onClick={handleSearch}
-            disabled={searchLoading || !role.trim() || !location.trim()}
+            disabled={searchLoading || rolesLoading || !roleId || !location.trim()}
           >
             {searchLoading ? (
               <span className="btn-loading">
@@ -381,7 +419,7 @@ export default function ExploreScreen({ onBack }: ExploreProps) {
           {searchError && <p className="error-text">{searchError}</p>}
 
           {searched && !searchLoading && stats && (
-            <StatsPanel stats={stats} role={role.trim()} location={location.trim()} />
+            <StatsPanel stats={stats} roleLabel={selectedRoleLabel} location={location.trim()} />
           )}
 
           {!searched && (
@@ -397,7 +435,7 @@ export default function ExploreScreen({ onBack }: ExploreProps) {
                 textAlign:    "center",
               }}
             >
-              Enter a job title and location to see aggregate salary data
+              Pick a role and enter a location to see aggregate salary data
               from all FairPay submissions for that role.
             </div>
           )}
