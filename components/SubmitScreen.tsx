@@ -2,13 +2,18 @@
 // FairPay — Submit Screen
 // FOLDER: components/SubmitScreen.tsx
 //
-// 7-field form: job_title, industry, location, years_experience,
-// current_salary, currency, employment_type.
-// All values stored as strings — matches contract parameter types exactly.
-// Salary field strips commas/symbols before submitting.
+// v2.0 — job title is now a curated dropdown populated from get_roles(),
+// not free text. This is what makes the AI's web fetch load-bearing rather
+// than decorative — see fairpay.py module docstring for the full reasoning.
+//
+// Currency is USD or GBP only (NGN dropped — no verified live source).
+// When GBP is selected and the chosen role's gbp_specific is false, we show
+// a small honest note that the verdict will lean on a broader UK estimate
+// rather than implying parity with the US source.
 
-import { useState } from "react";
-import { SubmitFormData, Currency, EmploymentType, ExperienceBand } from "../types";
+import { useState, useEffect, useMemo } from "react";
+import { Role, SubmitFormData, Currency, ExperienceBand, EmploymentType } from "../types";
+import { getRoles } from "../lib/contract";
 
 interface SubmitProps {
   onSubmit: (form: SubmitFormData) => void;
@@ -17,375 +22,249 @@ interface SubmitProps {
   error: string;
 }
 
-// ----------------------------------------------------------------
-// Static option lists — match contract constants exactly
-// ----------------------------------------------------------------
-const CURRENCIES: { value: Currency; label: string; flag: string }[] = [
-  { value: "USD", label: "US Dollar", flag: "🇺🇸" },
-  { value: "GBP", label: "British Pound", flag: "🇬🇧" },
-  { value: "NGN", label: "Nigerian Naira", flag: "🇳🇬" },
+const EXPERIENCE_OPTIONS: { value: ExperienceBand; label: string }[] = [
+  { value: "0-1",  label: "0–1 years" },
+  { value: "1-3",  label: "1–3 years" },
+  { value: "3-5",  label: "3–5 years" },
+  { value: "5-10", label: "5–10 years" },
+  { value: "10+",  label: "10+ years" },
 ];
 
-const EMPLOYMENT_TYPES: { value: EmploymentType; label: string }[] = [
-  { value: "Full-time", label: "Full-time" },
-  { value: "Contract",  label: "Contract"  },
-  { value: "Part-time", label: "Part-time" },
-  { value: "Remote",    label: "Remote"    },
+const EMPLOYMENT_OPTIONS: EmploymentType[] = ["Full-time", "Contract", "Part-time", "Remote"];
+
+const CURRENCY_OPTIONS: { value: Currency; label: string }[] = [
+  { value: "USD", label: "🇺🇸 USD — US Dollar" },
+  { value: "GBP", label: "🇬🇧 GBP — British Pound" },
 ];
-
-const EXPERIENCE_BANDS: { value: ExperienceBand; label: string }[] = [
-  { value: "0-1",  label: "0–1 years"   },
-  { value: "1-3",  label: "1–3 years"   },
-  { value: "3-5",  label: "3–5 years"   },
-  { value: "5-10", label: "5–10 years"  },
-  { value: "10+",  label: "10+ years"   },
-];
-
-const INDUSTRIES = [
-  "Technology",
-  "Finance & Banking",
-  "Healthcare",
-  "Education",
-  "Marketing & Advertising",
-  "Engineering",
-  "Legal",
-  "Consulting",
-  "Sales",
-  "Design & Creative",
-  "Operations",
-  "Human Resources",
-  "Product Management",
-  "Data & Analytics",
-  "Media & Entertainment",
-  "Retail & E-commerce",
-  "Real Estate",
-  "Manufacturing",
-  "Non-profit",
-  "Government & Public Sector",
-  "Other",
-];
-
-// ----------------------------------------------------------------
-// Currency symbol helper
-// ----------------------------------------------------------------
-function currencySymbol(c: Currency): string {
-  if (c === "USD") return "$";
-  if (c === "GBP") return "£";
-  if (c === "NGN") return "₦";
-  return "";
-}
-
-// ----------------------------------------------------------------
-// Form validation
-// ----------------------------------------------------------------
-interface FormErrors {
-  job_title?:       string;
-  industry?:        string;
-  location?:        string;
-  current_salary?:  string;
-}
-
-function validate(form: SubmitFormData): FormErrors {
-  const errs: FormErrors = {};
-  if (!form.job_title.trim())
-    errs.job_title = "Job title is required";
-  if (!form.industry)
-    errs.industry = "Select an industry";
-  if (!form.location.trim())
-    errs.location = "Location is required";
-  const salaryNum = Number(form.current_salary.replace(/[^0-9.]/g, ""));
-  if (!form.current_salary.trim() || isNaN(salaryNum) || salaryNum <= 0)
-    errs.current_salary = "Enter a valid salary amount";
-  return errs;
-}
 
 export default function SubmitScreen({ onSubmit, onBack, loading, error }: SubmitProps) {
-  const [form, setForm] = useState<SubmitFormData>({
-    job_title:        "",
-    industry:         "",
-    location:         "",
-    years_experience: "3-5",
-    current_salary:   "",
-    currency:         "USD",
-    employment_type:  "Full-time",
-  });
-  const [fieldErrors, setFieldErrors] = useState<FormErrors>({});
-  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [roles, setRoles]               = useState<Role[]>([]);
+  const [rolesLoading, setRolesLoading] = useState(true);
+  const [rolesError, setRolesError]     = useState("");
 
-  function update<K extends keyof SubmitFormData>(key: K, value: SubmitFormData[K]) {
-    setForm((f) => ({ ...f, [key]: value }));
-    // Clear field error on change
-    if (fieldErrors[key as keyof FormErrors]) {
-      setFieldErrors((e) => ({ ...e, [key]: undefined }));
+  const [roleId, setRoleId]                   = useState("");
+  const [industry, setIndustry]               = useState("");
+  const [location, setLocation]               = useState("");
+  const [yearsExperience, setYearsExperience] = useState<ExperienceBand>("1-3");
+  const [currentSalary, setCurrentSalary]     = useState("");
+  const [currency, setCurrency]               = useState<Currency>("USD");
+  const [employmentType, setEmploymentType]   = useState<EmploymentType>("Full-time");
+
+  const [formError, setFormError] = useState("");
+
+  // Load curated role list on mount
+  useEffect(() => {
+    async function loadRoles() {
+      setRolesLoading(true);
+      setRolesError("");
+      try {
+        const data = await getRoles();
+        setRoles(data);
+        if (data.length > 0) setRoleId(data[0].id);
+      } catch {
+        setRolesError("Could not load role list. Check your connection and try again.");
+      } finally {
+        setRolesLoading(false);
+      }
     }
-  }
+    loadRoles();
+  }, []);
 
-  function handleBlur(key: string) {
-    setTouched((t) => ({ ...t, [key]: true }));
-  }
+  const selectedRole = useMemo(
+    () => roles.find((r) => r.id === roleId) || null,
+    [roles, roleId]
+  );
 
-  function handleSalaryInput(raw: string) {
-    // Allow digits, one decimal point, commas (stripped on submit)
-    const cleaned = raw.replace(/[^0-9.,]/g, "");
-    update("current_salary", cleaned);
+  // Honest note shown only when it's actually relevant — GBP selected and
+  // this specific role doesn't have a named figure on the UK source.
+  const showGbpBroadNote = currency === "GBP" && selectedRole && !selectedRole.gbp_specific;
+
+  function validate(): string {
+    if (!roleId) return "Please select a role.";
+    if (!industry.trim()) return "Please enter an industry.";
+    if (!location.trim()) return "Please enter a location.";
+    const salaryNum = parseInt(currentSalary, 10);
+    if (!currentSalary.trim() || isNaN(salaryNum) || salaryNum <= 0) {
+      return "Please enter a valid salary amount.";
+    }
+    return "";
   }
 
   function handleSubmit() {
-    // Mark all fields touched to show errors
-    setTouched({ job_title: true, industry: true, location: true, current_salary: true });
-    const errs = validate(form);
-    setFieldErrors(errs);
-    if (Object.keys(errs).length > 0) return;
-
-    // Strip formatting from salary before passing to contract
-    const cleanSalary = form.current_salary.replace(/[^0-9.]/g, "").replace(/\..*/, "");
-
-    onSubmit({ ...form, current_salary: cleanSalary });
+    const validationError = validate();
+    if (validationError) {
+      setFormError(validationError);
+      return;
+    }
+    setFormError("");
+    onSubmit({
+      role_id: roleId,
+      industry: industry.trim(),
+      location: location.trim(),
+      years_experience: yearsExperience,
+      current_salary: parseInt(currentSalary, 10).toString(),
+      currency,
+      employment_type: employmentType,
+    });
   }
 
-  const sym = currencySymbol(form.currency);
-
-  function fieldError(key: keyof FormErrors) {
-    return touched[key] ? fieldErrors[key] : undefined;
-  }
+  const displayError = formError || error;
 
   return (
     <div className="screen fadeIn">
 
-      {/* Header */}
       <button className="back-btn" onClick={onBack}>← Back</button>
-      <h2 className="screen-title">Check My Salary</h2>
+      <h2 className="screen-title">Check Your Salary</h2>
       <p className="screen-sub">
-        All fields are anonymous. We only use this data to evaluate your salary
-        — nothing is linked to your identity.
+        Select your role and enter your details. Our AI fetches live wage
+        data for your exact role and grounds its verdict in what it actually
+        finds — not a guess from memory.
       </p>
 
-      {/* ── Field: Job Title ── */}
+      {/* ── Role dropdown ── */}
       <div className="field-group">
-        <label className="field-label">Job Title</label>
-        <input
-          type="text"
-          placeholder="e.g. Senior Software Engineer"
-          value={form.job_title}
-          onChange={(e) => update("job_title", e.target.value)}
-          onBlur={() => handleBlur("job_title")}
-          maxLength={80}
-          disabled={loading}
-        />
-        {fieldError("job_title") && (
-          <span className="error-text">{fieldError("job_title")}</span>
-        )}
-      </div>
-
-      {/* ── Field: Industry ── */}
-      <div className="field-group">
-        <label className="field-label">Industry</label>
-        <div style={{ position: "relative" }}>
-          <select
-            value={form.industry}
-            onChange={(e) => update("industry", e.target.value)}
-            onBlur={() => handleBlur("industry")}
-            disabled={loading}
-          >
-            <option value="" disabled>Select your industry...</option>
-            {INDUSTRIES.map((ind) => (
-              <option key={ind} value={ind}>{ind}</option>
+        <label className="field-label">Role</label>
+        {rolesLoading ? (
+          <div className="loading-state">
+            <span className="spinner" />
+            <span>Loading roles…</span>
+          </div>
+        ) : rolesError ? (
+          <p className="error-text">{rolesError}</p>
+        ) : (
+          <select value={roleId} onChange={(e) => setRoleId(e.target.value)}>
+            {roles.map((r) => (
+              <option key={r.id} value={r.id}>{r.label}</option>
             ))}
           </select>
-        </div>
-        {fieldError("industry") && (
-          <span className="error-text">{fieldError("industry")}</span>
-        )}
-      </div>
-
-      {/* ── Field: Location ── */}
-      <div className="field-group">
-        <label className="field-label">Location</label>
-        <input
-          type="text"
-          placeholder="e.g. Lagos, London, New York"
-          value={form.location}
-          onChange={(e) => update("location", e.target.value)}
-          onBlur={() => handleBlur("location")}
-          maxLength={80}
-          disabled={loading}
-        />
-        {fieldError("location") && (
-          <span className="error-text">{fieldError("location")}</span>
         )}
         <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-          Be specific — city-level gives the most accurate result
+          Roles are curated to a list with a verified live wage-data source —
+          this is what lets the AI cite a real figure instead of guessing.
         </span>
       </div>
 
-      {/* ── Fields: Experience + Employment (2-col grid) ── */}
+      {/* ── Industry + Location ── */}
       <div className="form-grid-2">
         <div className="field-group">
-          <label className="field-label">Experience</label>
-          <select
-            value={form.years_experience}
-            onChange={(e) => update("years_experience", e.target.value as ExperienceBand)}
-            disabled={loading}
-          >
-            {EXPERIENCE_BANDS.map((b) => (
-              <option key={b.value} value={b.value}>{b.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div className="field-group">
-          <label className="field-label">Employment</label>
-          <select
-            value={form.employment_type}
-            onChange={(e) => update("employment_type", e.target.value as EmploymentType)}
-            disabled={loading}
-          >
-            {EMPLOYMENT_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* ── Fields: Salary + Currency ── */}
-      <div className="field-group">
-        <label className="field-label">Current Salary (annual)</label>
-
-        {/* Currency picker — tab-style above the salary input */}
-        <div
-          style={{
-            display: "flex",
-            gap: "6px",
-            marginBottom: "6px",
-          }}
-        >
-          {CURRENCIES.map((c) => (
-            <button
-              key={c.value}
-              onClick={() => update("currency", c.value)}
-              disabled={loading}
-              style={{
-                flex: 1,
-                padding: "8px 4px",
-                borderRadius: "8px",
-                border: "1.5px solid",
-                borderColor: form.currency === c.value
-                  ? "var(--indigo)"
-                  : "var(--border)",
-                background: form.currency === c.value
-                  ? "var(--indigo-dim)"
-                  : "var(--bg-input)",
-                color: form.currency === c.value
-                  ? "var(--indigo-light)"
-                  : "var(--text-muted)",
-                fontWeight: 700,
-                fontSize: "12px",
-                cursor: "pointer",
-                transition: "all 0.15s",
-                fontFamily: "'Inter', sans-serif",
-              }}
-            >
-              {c.flag} {c.value}
-            </button>
-          ))}
-        </div>
-
-        {/* Salary input with currency symbol prefix */}
-        <div style={{ position: "relative" }}>
-          <span
-            style={{
-              position: "absolute",
-              left: "14px",
-              top: "50%",
-              transform: "translateY(-50%)",
-              fontFamily: "'Bebas Neue', sans-serif",
-              fontSize: "1.15rem",
-              color: "var(--text-muted)",
-              pointerEvents: "none",
-              letterSpacing: "0.04em",
-            }}
-          >
-            {sym}
-          </span>
+          <label className="field-label">Industry</label>
           <input
             type="text"
-            inputMode="numeric"
-            placeholder="85,000"
-            value={form.current_salary}
-            onChange={(e) => handleSalaryInput(e.target.value)}
-            onBlur={() => handleBlur("current_salary")}
-            disabled={loading}
-            maxLength={12}
-            style={{ paddingLeft: sym ? "2rem" : "1rem" }}
+            placeholder="e.g. Fintech, Healthcare"
+            value={industry}
+            onChange={(e) => setIndustry(e.target.value)}
           />
         </div>
-
-        {fieldError("current_salary") && (
-          <span className="error-text">{fieldError("current_salary")}</span>
-        )}
-        <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-          Enter your gross annual salary in {form.currency}
-        </span>
+        <div className="field-group">
+          <label className="field-label">Location</label>
+          <input
+            type="text"
+            placeholder="e.g. London, New York"
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
+          />
+        </div>
       </div>
 
-      {/* ── Privacy reminder ── */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: "10px",
-          padding: "12px 14px",
-          background: "var(--indigo-dim)",
-          border: "1px solid rgba(108,99,255,0.18)",
-          borderRadius: "10px",
-          fontSize: "12px",
-          color: "var(--text-secondary)",
-          lineHeight: 1.6,
-        }}
-      >
-        <span style={{ fontSize: "16px", flexShrink: 0 }}>🔒</span>
-        <span>
-          Your submission is <strong style={{ color: "var(--text-primary)" }}>completely anonymous</strong>.
-          No name, no email, no employer. Your wallet address is the only
-          identifier and it stays in your browser.
-        </span>
+      {/* ── Experience + Employment type ── */}
+      <div className="form-grid-2">
+        <div className="field-group">
+          <label className="field-label">Years of Experience</label>
+          <select
+            value={yearsExperience}
+            onChange={(e) => setYearsExperience(e.target.value as ExperienceBand)}
+          >
+            {EXPERIENCE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field-group">
+          <label className="field-label">Employment Type</label>
+          <select
+            value={employmentType}
+            onChange={(e) => setEmploymentType(e.target.value as EmploymentType)}
+          >
+            {EMPLOYMENT_OPTIONS.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
-      {/* ── Submit button ── */}
+      {/* ── Salary + Currency ── */}
+      <div className="form-grid-2">
+        <div className="field-group">
+          <label className="field-label">Current Salary (annual)</label>
+          <input
+            type="number"
+            inputMode="numeric"
+            placeholder="e.g. 85000"
+            value={currentSalary}
+            onChange={(e) => setCurrentSalary(e.target.value)}
+          />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Currency</label>
+          <select value={currency} onChange={(e) => setCurrency(e.target.value as Currency)}>
+            {CURRENCY_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* ── Honest GBP-tier note — only shown when actually relevant ── */}
+      {showGbpBroadNote && (
+        <div
+          style={{
+            background:   "var(--conf-medium-dim)",
+            border:       "1px solid var(--conf-medium-border)",
+            borderRadius: "10px",
+            padding:      "12px 16px",
+            fontSize:     "12px",
+            color:        "var(--conf-medium)",
+            lineHeight:   1.6,
+          }}
+        >
+          ℹ️ &nbsp;The UK data source doesn't publish a figure specific to
+          this role — the AI will ground its estimate in the broader UK
+          earnings figure on the page instead, and confidence will reflect that.
+        </div>
+      )}
+
+      {/* ── Error ── */}
+      {displayError && <p className="error-text">{displayError}</p>}
+
+      {/* ── Submit ── */}
       <button
         className="btn-amber"
         onClick={handleSubmit}
-        disabled={loading}
-        style={{ marginTop: "4px" }}
+        disabled={loading || rolesLoading || !!rolesError}
       >
         {loading ? (
           <span className="btn-loading">
-            <span className="spinner" style={{ borderTopColor: "#070912" }} />
-            Submitting to chain...
+            <span className="spinner" />
+            Submitting…
           </span>
         ) : (
-          "⚖️ \u00A0 EVALUATE MY SALARY"
+          "⚖️ Get My Verdict"
         )}
       </button>
 
-      {/* ── Timing notice ── */}
-      <div
+      {/* ── Privacy note ── */}
+      <p
         style={{
-          background: "rgba(255,255,255,0.02)",
-          border: "1px solid var(--border)",
-          borderRadius: "10px",
-          padding: "12px 14px",
-          fontSize: "12px",
-          color: "var(--text-muted)",
+          fontSize:   "12px",
+          color:      "var(--text-muted)",
+          textAlign:  "center",
           lineHeight: 1.6,
-          textAlign: "center",
+          padding:    "0 8px",
         }}
       >
-        ⏱ &nbsp;AI evaluation takes <strong style={{ color: "var(--text-secondary)" }}>3–5 minutes</strong>.
-        You'll get a submission ID — save it to check results later.
-      </div>
-
-      {error && <p className="error-text" style={{ textAlign: "center" }}>{error}</p>}
+        🔒 &nbsp;No name, no email. Your wallet address is the only identifier,
+        generated automatically on this device.
+      </p>
 
     </div>
   );
